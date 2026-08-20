@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1 - 2026-08-20
+
+- Fixed severe room over-segmentation caused by camera turns and combat effects.
+- Increased scene-matching tolerance and added A-B-A flicker smoothing.
+- Require a destination to remain stable before recording a transition.
+- Hide rooms and connections that lack repeated cross-video support by default.
+- Corrected confidence scoring so a single-video transition no longer appears highly reliable.
+- Clear stale automatic results before rebuilding a dungeon.
+- Keep all weak evidence accessible through **Show uncertain**.
+
 ## 0.3.0 - 2026-08-20
 
 - Added one-button full-playlist dungeon mapping.
