@@ -14,6 +14,8 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
+from collections import Counter
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
@@ -24,6 +26,8 @@ WEB = ROOT / "web"
 VIDEO_DIR = DATA / "videos"
 FRAME_DIR = DATA / "frames"
 EXPORT_DIR = ROOT / "exports"
+JOBS: dict[str, dict] = {}
+JOBS_LOCK = threading.Lock()
 
 PLAYLISTS = [
     ("The Bat Cave", "PLB0ObTILrzho"), ("Hot Springs Haven", "PLDXBvu308lMc"),
@@ -60,7 +64,8 @@ def init_db() -> None:
           youtube_id TEXT, title TEXT NOT NULL, path TEXT, duration REAL, status TEXT DEFAULT 'listed', UNIQUE(dungeon_id,youtube_id));
         CREATE TABLE IF NOT EXISTS rooms(id INTEGER PRIMARY KEY, dungeon_id INTEGER NOT NULL REFERENCES dungeons(id),
           label TEXT NOT NULL, signature TEXT, status TEXT DEFAULT 'candidate', confidence REAL DEFAULT .5,
-          representative_frame TEXT, UNIQUE(dungeon_id,label));
+          representative_frame TEXT, color_signature TEXT, x REAL, y REAL, floor INTEGER DEFAULT 1,
+          kind TEXT DEFAULT 'room', notes TEXT DEFAULT '', UNIQUE(dungeon_id,label));
         CREATE TABLE IF NOT EXISTS evidence(id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id),
           video_id INTEGER NOT NULL REFERENCES videos(id), timestamp REAL NOT NULL, frame_path TEXT NOT NULL,
           signature TEXT NOT NULL);
@@ -68,6 +73,13 @@ def init_db() -> None:
           from_room INTEGER NOT NULL REFERENCES rooms(id), to_room INTEGER NOT NULL REFERENCES rooms(id),
           video_id INTEGER NOT NULL REFERENCES videos(id), timestamp REAL NOT NULL, status TEXT DEFAULT 'candidate');
         """)
+        # Safe migrations for databases created by v0.1.
+        existing = {r[1] for r in c.execute("PRAGMA table_info(rooms)")}
+        for name, declaration in {
+            "color_signature": "TEXT", "x": "REAL", "y": "REAL", "floor": "INTEGER DEFAULT 1",
+            "kind": "TEXT DEFAULT 'room'", "notes": "TEXT DEFAULT ''",
+        }.items():
+            if name not in existing: c.execute(f"ALTER TABLE rooms ADD COLUMN {name} {declaration}")
         c.executemany("INSERT OR IGNORE INTO dungeons(name,playlist_id) VALUES(?,?)", PLAYLISTS)
 
 
@@ -84,6 +96,28 @@ def ppm_hash(path: Path) -> int:
     avg = sum(grey) / len(grey)
     # 576-bit signature represented as an integer.
     return sum((v >= avg) << i for i, v in enumerate(grey))
+
+
+def ppm_fingerprint(path: Path) -> tuple[int, tuple[int, ...]]:
+    """Return a structural hash plus an 8-bin histogram for each RGB channel."""
+    raw = path.read_bytes()
+    m = re.match(br"P6\s+(?:#[^\n]*\n\s*)?(\d+)\s+(\d+)\s+255\s", raw)
+    if not m: raise ValueError(f"Unsupported frame: {path}")
+    pixels = raw[m.end():]
+    hist = [0] * 24
+    for i in range(0, len(pixels), 3):
+        hist[pixels[i] // 32] += 1
+        hist[8 + pixels[i + 1] // 32] += 1
+        hist[16 + pixels[i + 2] // 32] += 1
+    total = max(1, len(pixels) // 3)
+    normalized = tuple(round(v * 1000 / total) for v in hist)
+    return ppm_hash(path), normalized
+
+
+def fingerprint_distance(a_hash: int, a_color: tuple[int, ...], b_hash: int, b_color: tuple[int, ...]) -> float:
+    structure = distance(a_hash, b_hash) / 576
+    color = sum(abs(a - b) for a, b in zip(a_color, b_color)) / 6000
+    return structure * .72 + min(1.0, color) * .28
 
 
 def distance(a: int, b: int) -> int: return (a ^ b).bit_count()
@@ -125,7 +159,7 @@ def import_playlist(dungeon: str, download: bool = False) -> dict:
     return {"title": meta.get("title", dungeon), "count": len(meta.get("entries", []))}
 
 
-def analyze_video(video_id: int, interval: float = 5.0, threshold: int = 105) -> dict:
+def analyze_video(video_id: int, interval: float = 5.0, threshold: float = .24) -> dict:
     require("ffmpeg")
     with db() as c:
         v = c.execute("SELECT v.*,d.name dungeon FROM videos v JOIN dungeons d ON d.id=v.dungeon_id WHERE v.id=?", (video_id,)).fetchone()
@@ -141,17 +175,26 @@ def analyze_video(video_id: int, interval: float = 5.0, threshold: int = 105) ->
         c.execute("DELETE FROM transitions WHERE video_id=?", (video_id,))
         c.execute("DELETE FROM evidence WHERE video_id=?", (video_id,))
         rooms = c.execute("SELECT * FROM rooms WHERE dungeon_id=? AND status!='rejected'", (v["dungeon_id"],)).fetchall()
-        signatures = [(r["id"], int(r["signature"], 16)) for r in rooms if r["signature"]]
+        signatures = [(r["id"], int(r["signature"], 16), tuple(json.loads(r["color_signature"] or "[]")))
+                      for r in rooms if r["signature"] and r["color_signature"]]
         previous = None; created = 0; observations = 0
         for idx, ppm in enumerate(sorted(out.glob("hash-*.ppm")), 1):
-            sig = ppm_hash(ppm)
-            best = min(((distance(sig, s), rid) for rid, s in signatures), default=(10**9, None))
+            sig, colors = ppm_fingerprint(ppm)
+            best = min(((fingerprint_distance(sig, colors, s, color), rid) for rid, s, color in signatures),
+                       default=(10**9, None))
             jpg = out / f"frame-{idx:06d}.jpg"; timestamp = (idx - 1) * interval
             if best[0] > threshold:
-                label = f"Candidate room {len(signatures)+1}"
-                cur = c.execute("INSERT INTO rooms(dungeon_id,label,signature,representative_frame) VALUES(?,?,?,?)",
-                                (v["dungeon_id"], label, hex(sig), str(jpg)))
-                rid = cur.lastrowid; signatures.append((rid, sig)); created += 1
+                number = c.execute("SELECT COUNT(*)+1 FROM rooms WHERE dungeon_id=?", (v["dungeon_id"],)).fetchone()[0]
+                label = f"Candidate room {number}"
+                while c.execute("SELECT 1 FROM rooms WHERE dungeon_id=? AND label=?", (v["dungeon_id"], label)).fetchone():
+                    number += 1
+                    label = f"Candidate room {number}"
+                angle = len(signatures) * 2.399
+                x, y = 600 + 250 * __import__("math").cos(angle), 350 + 250 * __import__("math").sin(angle)
+                cur = c.execute("""INSERT INTO rooms(dungeon_id,label,signature,color_signature,representative_frame,x,y)
+                                 VALUES(?,?,?,?,?,?,?)""",
+                                (v["dungeon_id"], label, hex(sig), json.dumps(colors), str(jpg), x, y))
+                rid = cur.lastrowid; signatures.append((rid, sig, colors)); created += 1
             else: rid = best[1]
             c.execute("INSERT INTO evidence(room_id,video_id,timestamp,frame_path,signature) VALUES(?,?,?,?,?)",
                       (rid, video_id, timestamp, str(jpg), hex(sig)))
@@ -164,16 +207,54 @@ def analyze_video(video_id: int, interval: float = 5.0, threshold: int = 105) ->
     return {"rooms_created": created, "observations": observations}
 
 
+def start_job(kind: str, function, *args) -> str:
+    job_id = uuid.uuid4().hex[:12]
+    with JOBS_LOCK: JOBS[job_id] = {"id": job_id, "kind": kind, "status": "queued", "created": time.time()}
+    def runner():
+        with JOBS_LOCK: JOBS[job_id]["status"] = "running"
+        try:
+            result = function(*args)
+            with JOBS_LOCK: JOBS[job_id].update(status="complete", result=result, finished=time.time())
+        except Exception as exc:
+            with JOBS_LOCK: JOBS[job_id].update(status="failed", error=str(exc), finished=time.time())
+    threading.Thread(target=runner, daemon=True).start()
+    return job_id
+
+
+def merge_rooms(source_id: int, target_id: int) -> None:
+    if source_id == target_id: return
+    with db() as c:
+        source = c.execute("SELECT dungeon_id FROM rooms WHERE id=?", (source_id,)).fetchone()
+        target = c.execute("SELECT dungeon_id FROM rooms WHERE id=?", (target_id,)).fetchone()
+        if not source or not target or source[0] != target[0]: raise ValueError("Rooms must belong to the same dungeon")
+        c.execute("UPDATE evidence SET room_id=? WHERE room_id=?", (target_id, source_id))
+        c.execute("UPDATE transitions SET from_room=? WHERE from_room=?", (target_id, source_id))
+        c.execute("UPDATE transitions SET to_room=? WHERE to_room=?", (target_id, source_id))
+        c.execute("DELETE FROM transitions WHERE from_room=to_room")
+        c.execute("DELETE FROM rooms WHERE id=?", (source_id,))
+
+
 def graph_data(dungeon: str) -> dict:
     with db() as c:
         d = c.execute("SELECT * FROM dungeons WHERE name=?", (dungeon,)).fetchone()
         if not d: raise ValueError("Unknown dungeon")
         rooms = [dict(r) for r in c.execute("SELECT * FROM rooms WHERE dungeon_id=? ORDER BY id", (d["id"],))]
-        edges = [dict(r) for r in c.execute("""SELECT t.*,a.label from_label,b.label to_label,v.title video_title
+        raw_edges = [dict(r) for r in c.execute("""SELECT t.from_room,t.to_room,a.label from_label,b.label to_label,
+          COUNT(*) observations,COUNT(DISTINCT t.video_id) supporting_videos,
+          SUM(CASE WHEN t.status='confirmed' THEN 1 ELSE 0 END) confirmed_observations,
+          MIN(t.timestamp) first_timestamp
           FROM transitions t JOIN rooms a ON a.id=t.from_room JOIN rooms b ON b.id=t.to_room
-          JOIN videos v ON v.id=t.video_id WHERE t.dungeon_id=? ORDER BY t.id""", (d["id"],))]
+          WHERE t.dungeon_id=? GROUP BY t.from_room,t.to_room ORDER BY supporting_videos DESC,observations DESC""", (d["id"],))]
+        for edge in raw_edges:
+            edge["confidence"] = round(min(.99, .35 + .18 * edge["supporting_videos"] + .04 * edge["observations"]), 2)
+            edge["status"] = "confirmed" if edge["confirmed_observations"] else "candidate"
+        evidence = [dict(r) for r in c.execute("""SELECT e.id,e.room_id,e.video_id,e.timestamp,e.frame_path,v.title video_title
+          FROM evidence e JOIN videos v ON v.id=e.video_id WHERE v.dungeon_id=? ORDER BY e.timestamp""", (d["id"],))]
+        evidence_by_room: dict[int, list] = {}
+        for item in evidence: evidence_by_room.setdefault(item["room_id"], []).append(item)
+        for room in rooms: room["evidence"] = evidence_by_room.get(room["id"], [])
         videos = [dict(r) for r in c.execute("SELECT * FROM videos WHERE dungeon_id=? ORDER BY id", (d["id"],))]
-        return {"dungeon": dict(d), "rooms": rooms, "edges": edges, "videos": videos}
+        return {"dungeon": dict(d), "rooms": rooms, "edges": raw_edges, "videos": videos}
 
 
 def export_graph(dungeon: str, fmt: str = "json") -> Path:
@@ -181,18 +262,22 @@ def export_graph(dungeon: str, fmt: str = "json") -> Path:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", dungeon)
     if fmt == "json":
         out = EXPORT_DIR / f"{safe}.json"; out.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    else:
+    elif fmt == "dot":
         out = EXPORT_DIR / f"{safe}.dot"
         lines = ["digraph dungeon {", "  rankdir=LR;", f'  label="{dungeon}";']
         for r in data["rooms"]:
             style = "solid" if r["status"] == "confirmed" else "dashed"
             lines.append(f'  r{r["id"]} [label={json.dumps(r["label"])},style={style}];')
-        seen = set()
         for e in data["edges"]:
-            key = (e["from_room"], e["to_room"])
-            if key not in seen:
-                lines.append(f'  r{key[0]} -> r{key[1]} [label={json.dumps(e["status"])}];'); seen.add(key)
+            label = f'{e["supporting_videos"]} video(s), {e["confidence"]:.0%}'
+            lines.append(f'  r{e["from_room"]} -> r{e["to_room"]} [label={json.dumps(label)}];')
         lines.append("}"); out.write_text("\n".join(lines), encoding="utf-8")
+    else:
+        import csv
+        out = EXPORT_DIR / f"{safe}.csv"
+        with out.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f); writer.writerow(["from_room", "to_room", "supporting_videos", "observations", "confidence", "status"])
+            for e in data["edges"]: writer.writerow([e["from_label"], e["to_label"], e["supporting_videos"], e["observations"], e["confidence"], e["status"]])
     return out
 
 
@@ -204,12 +289,36 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
     def body(self):
         size = int(self.headers.get("Content-Length", "0")); return json.loads(self.rfile.read(size) or b"{}")
+    def serve_video(self, video_id: int):
+        with db() as c: row = c.execute("SELECT path FROM videos WHERE id=?", (video_id,)).fetchone()
+        if not row or not row[0] or not Path(row[0]).is_file(): return self.send_error(404)
+        path = Path(row[0]); size = path.stat().st_size; start, end = 0, size - 1
+        match = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        if match:
+            start = int(match.group(1)); end = int(match.group(2)) if match.group(2) else min(size - 1, start + 4 * 1024 * 1024)
+        if start >= size or end < start: return self.send_error(416)
+        code = 206 if match else 200
+        self.send_response(code); self.send_header("Content-Type", "video/mp4"); self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if match: self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        with path.open("rb") as f:
+            f.seek(start); remaining = end - start + 1
+            while remaining:
+                chunk = f.read(min(65536, remaining))
+                if not chunk: break
+                self.wfile.write(chunk); remaining -= len(chunk)
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         if u.path == "/api/dungeons":
             with db() as c: return self.send_json([dict(x) for x in c.execute("SELECT * FROM dungeons ORDER BY id")])
         if u.path == "/api/graph":
             try: return self.send_json(graph_data(urllib.parse.parse_qs(u.query).get("dungeon", [""])[0]))
+            except Exception as e: return self.send_json({"error": str(e)}, 400)
+        if u.path == "/api/jobs":
+            with JOBS_LOCK: return self.send_json(list(JOBS.values()))
+        if u.path == "/api/video":
+            try: return self.serve_video(int(urllib.parse.parse_qs(u.query).get("id", ["0"])[0]))
             except Exception as e: return self.send_json({"error": str(e)}, 400)
         if u.path.startswith("/media/"):
             p = (ROOT / urllib.parse.unquote(u.path[1:])).resolve()
@@ -221,13 +330,22 @@ class Handler(SimpleHTTPRequestHandler):
             b = self.body()
             if self.path == "/api/local-video": result = {"video_id": add_local_video(b["dungeon"], b["path"])}
             elif self.path == "/api/import": result = import_playlist(b["dungeon"], bool(b.get("download")))
-            elif self.path == "/api/analyze": result = analyze_video(int(b["video_id"]), float(b.get("interval", 5)))
+            elif self.path == "/api/analyze":
+                result = {"job_id": start_job("analyze", analyze_video, int(b["video_id"]), float(b.get("interval", 5)))}
             elif self.path == "/api/review":
                 with db() as c:
                     fields=[]; vals=[]
-                    for key in ("label", "status"):
+                    for key in ("label", "status", "x", "y", "floor", "kind", "notes"):
                         if key in b: fields.append(f"{key}=?"); vals.append(b[key])
+                    if not fields: raise ValueError("No room fields supplied")
                     vals.append(int(b["room_id"])); c.execute(f"UPDATE rooms SET {','.join(fields)} WHERE id=?", vals)
+                result = {"ok": True}
+            elif self.path == "/api/merge":
+                merge_rooms(int(b["source_id"]), int(b["target_id"])); result = {"ok": True}
+            elif self.path == "/api/transition":
+                with db() as c:
+                    c.execute("UPDATE transitions SET status=? WHERE dungeon_id=(SELECT id FROM dungeons WHERE name=?) AND from_room=? AND to_room=?",
+                              (b["status"], b["dungeon"], int(b["from_room"]), int(b["to_room"])))
                 result = {"ok": True}
             elif self.path == "/api/export": result = {"path": str(export_graph(b["dungeon"], b.get("format", "json")))}
             else: return self.send_json({"error": "Not found"}, 404)
@@ -244,7 +362,7 @@ def main():
     p = argparse.ArgumentParser(); sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve"); s.add_argument("--port", type=int, default=8765)
     a = sub.add_parser("analyze"); a.add_argument("video"); a.add_argument("--dungeon", required=True); a.add_argument("--interval", type=float, default=5)
-    e = sub.add_parser("export"); e.add_argument("--dungeon", required=True); e.add_argument("--format", choices=("json", "dot"), default="json")
+    e = sub.add_parser("export"); e.add_argument("--dungeon", required=True); e.add_argument("--format", choices=("json", "dot", "csv"), default="json")
     args = p.parse_args(); init_db()
     if args.cmd == "serve": serve(args.port)
     elif args.cmd == "analyze": print(json.dumps(analyze_video(add_local_video(args.dungeon, args.video), args.interval), indent=2))
@@ -252,4 +370,3 @@ def main():
 
 
 if __name__ == "__main__": main()
-
