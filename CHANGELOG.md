@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 - 2026-08-20
+
+- Added one-button full-playlist dungeon mapping.
+- Added plain-language progress for downloading, analysis, comparison, and layout.
+- Replaced circular placement with an entrance-first route and branch layout.
+- Added automatic low-evidence filtering while preserving uncertain evidence.
+- Moved individual download and analysis controls into an Advanced section.
+- Added one-click automatic re-layout.
+- Added tests for route layout and uncertainty classification.
+
 ## 0.2.0 - 2026-08-20
 
 - Added combined structural and color scene fingerprints.
