@@ -1,0 +1,35 @@
+name: Release v0.2.0
+
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Build release archive
+        run: |
+          mkdir -p dist/OSFR-Dungeon-Mapper
+          cp -R mapper.py run.sh README.md CHANGELOG.md LICENSE web tests dist/OSFR-Dungeon-Mapper/
+          cd dist
+          zip -r OSFR-Dungeon-Mapper-v0.2.0.zip OSFR-Dungeon-Mapper
+      - name: Publish release if absent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view v0.2.0 >/dev/null 2>&1; then
+            gh release create v0.2.0 \
+              dist/OSFR-Dungeon-Mapper-v0.2.0.zip \
+              --target main \
+              --title "OSFR Dungeon Mapper v0.2.0" \
+              --notes-file <(sed -n '/## 0.2.0/,/## 0.1.0/{/## 0.1.0/d;p}' CHANGELOG.md)
+          fi
