@@ -159,7 +159,7 @@ def import_playlist(dungeon: str, download: bool = False) -> dict:
     return {"title": meta.get("title", dungeon), "count": len(meta.get("entries", []))}
 
 
-def analyze_video(video_id: int, interval: float = 5.0, threshold: float = .24) -> dict:
+def analyze_video(video_id: int, interval: float = 5.0, threshold: float = .34) -> dict:
     require("ffmpeg")
     with db() as c:
         v = c.execute("SELECT v.*,d.name dungeon FROM videos v JOIN dungeons d ON d.id=v.dungeon_id WHERE v.id=?", (video_id,)).fetchone()
@@ -177,7 +177,7 @@ def analyze_video(video_id: int, interval: float = 5.0, threshold: float = .24) 
         rooms = c.execute("SELECT * FROM rooms WHERE dungeon_id=? AND status!='rejected'", (v["dungeon_id"],)).fetchall()
         signatures = [(r["id"], int(r["signature"], 16), tuple(json.loads(r["color_signature"] or "[]")))
                       for r in rooms if r["signature"] and r["color_signature"]]
-        previous = None; created = 0; observations = 0
+        created = 0; observations = 0; sequence = []
         for idx, ppm in enumerate(sorted(out.glob("hash-*.ppm")), 1):
             sig, colors = ppm_fingerprint(ppm)
             best = min(((fingerprint_distance(sig, colors, s, color), rid) for rid, s, color in signatures),
@@ -198,11 +198,19 @@ def analyze_video(video_id: int, interval: float = 5.0, threshold: float = .24) 
             else: rid = best[1]
             c.execute("INSERT INTO evidence(room_id,video_id,timestamp,frame_path,signature) VALUES(?,?,?,?,?)",
                       (rid, video_id, timestamp, str(jpg), hex(sig)))
-            observations += 1
-            if previous is not None and previous != rid:
+            sequence.append([rid, timestamp]); observations += 1
+        # Remove one-sample A-B-A flicker caused by camera turns, particles, and combat effects.
+        for i in range(1, len(sequence) - 1):
+            if sequence[i - 1][0] == sequence[i + 1][0] != sequence[i][0]: sequence[i][0] = sequence[i - 1][0]
+        # A transition is evidence only after the destination remains stable for two samples.
+        runs = []
+        for rid, timestamp in sequence:
+            if runs and runs[-1][0] == rid: runs[-1][2] += 1
+            else: runs.append([rid, timestamp, 1])
+        for previous, current in zip(runs, runs[1:]):
+            if current[2] >= 2:
                 c.execute("INSERT INTO transitions(dungeon_id,from_room,to_room,video_id,timestamp) VALUES(?,?,?,?,?)",
-                          (v["dungeon_id"], previous, rid, video_id, timestamp))
-            previous = rid
+                          (v["dungeon_id"], previous[0], current[0], video_id, current[1]))
         c.execute("UPDATE videos SET status='analyzed' WHERE id=?", (video_id,))
     return {"rooms_created": created, "observations": observations}
 
@@ -272,12 +280,14 @@ def classify_uncertain_rooms(dungeon: str) -> dict:
     """Keep weak one-off detections out of the primary map without deleting evidence."""
     with db() as c:
         did = c.execute("SELECT id FROM dungeons WHERE name=?", (dungeon,)).fetchone()[0]
+        total_videos = c.execute("SELECT COUNT(*) FROM videos WHERE dungeon_id=? AND status='analyzed'", (did,)).fetchone()[0]
         rows = c.execute("""SELECT r.id,COUNT(e.id) observations,COUNT(DISTINCT e.video_id) videos
           FROM rooms r LEFT JOIN evidence e ON e.room_id=r.id WHERE r.dungeon_id=? AND r.status='candidate'
           GROUP BY r.id""", (did,)).fetchall()
         hidden = 0
         for rid, observations, videos in rows:
-            if observations < 3 and videos < 2:
+            reliable = videos >= 2 if total_videos > 1 else observations >= 4
+            if not reliable:
                 c.execute("UPDATE rooms SET status='uncertain',confidence=.25 WHERE id=?", (rid,)); hidden += 1
             else:
                 confidence = min(.95, .45 + videos * .12 + min(observations, 10) * .025)
@@ -288,6 +298,12 @@ def classify_uncertain_rooms(dungeon: str) -> dict:
 def map_entire_dungeon(job_id: str, dungeon: str, interval: float = 5.0) -> dict:
     job_update(job_id, "Finding and downloading dungeon footage")
     imported = import_playlist(dungeon, True)
+    job_update(job_id, "Clearing previous automatic results")
+    with db() as c:
+        did = c.execute("SELECT id FROM dungeons WHERE name=?", (dungeon,)).fetchone()[0]
+        c.execute("DELETE FROM transitions WHERE dungeon_id=?", (did,))
+        c.execute("DELETE FROM evidence WHERE room_id IN (SELECT id FROM rooms WHERE dungeon_id=?)", (did,))
+        c.execute("DELETE FROM rooms WHERE dungeon_id=?", (did,))
     with db() as c:
         videos = [dict(v) for v in c.execute("""SELECT v.id,v.title FROM videos v JOIN dungeons d ON d.id=v.dungeon_id
           WHERE d.name=? AND v.path IS NOT NULL ORDER BY v.id""", (dungeon,))]
@@ -341,9 +357,10 @@ def graph_data(dungeon: str) -> dict:
           SUM(CASE WHEN t.status='confirmed' THEN 1 ELSE 0 END) confirmed_observations,
           MIN(t.timestamp) first_timestamp
           FROM transitions t JOIN rooms a ON a.id=t.from_room JOIN rooms b ON b.id=t.to_room
-          WHERE t.dungeon_id=? GROUP BY t.from_room,t.to_room ORDER BY supporting_videos DESC,observations DESC""", (d["id"],))]
+          WHERE t.dungeon_id=? AND a.status NOT IN ('rejected','uncertain') AND b.status NOT IN ('rejected','uncertain')
+          GROUP BY t.from_room,t.to_room ORDER BY supporting_videos DESC,observations DESC""", (d["id"],))]
         for edge in raw_edges:
-            edge["confidence"] = round(min(.99, .35 + .18 * edge["supporting_videos"] + .04 * edge["observations"]), 2)
+            edge["confidence"] = round(min(.97, .08 + .20 * edge["supporting_videos"] + .02 * min(edge["observations"], 8)), 2)
             edge["status"] = "confirmed" if edge["confirmed_observations"] else "candidate"
         evidence = [dict(r) for r in c.execute("""SELECT e.id,e.room_id,e.video_id,e.timestamp,e.frame_path,v.title video_title
           FROM evidence e JOIN videos v ON v.id=e.video_id WHERE v.dungeon_id=? ORDER BY e.timestamp""", (d["id"],))]
