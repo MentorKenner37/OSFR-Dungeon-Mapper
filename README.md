@@ -5,7 +5,7 @@ An evidence-first tool for reconstructing Free Realms dungeons from archived gam
 [![Tests](https://github.com/MentorKenner37/OSFR-Dungeon-Mapper/actions/workflows/tests.yml/badge.svg)](https://github.com/MentorKenner37/OSFR-Dungeon-Mapper/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-The mapper deliberately produces an evidence-backed **room graph**, not an invented geometric floor plan. Version 0.2 combines structural and color fingerprints, compares observations across videos, records every transition with timestamps, and gives a reviewer a purpose-built workstation for validating the reconstruction.
+The mapper deliberately produces an evidence-backed **room graph**, not an invented geometric floor plan. Version 0.3 can download and process a complete dungeon playlist, compare routes across videos, and automatically arrange the resulting route and branches.
 
 ## Highlights
 
@@ -13,7 +13,7 @@ The mapper deliberately produces an evidence-backed **room graph**, not an inven
 - Background video analysis with recoverable job status
 - Cross-video consensus and connection confidence scores
 - Embedded video player with evidence thumbnails and timestamp seeking
-- Draggable room graph with persistent positions and floor filtering
+- Automatic route-and-branch layout with draggable corrections and floor filtering
 - Room types, notes, confirmation, rejection, and duplicate merging
 - JSON, Graphviz DOT, and CSV research exports
 
@@ -29,14 +29,23 @@ python3 -m pip install --user yt-dlp
 
 Open <http://127.0.0.1:8765>.
 
+## One-click mapping
+
+1. Choose a dungeon.
+2. Click **START MAPPING THIS DUNGEON**.
+3. Leave the mapper open while it downloads and analyzes the playlist.
+4. Review only uncertain or incorrectly matched evidence.
+5. Export the finished map.
+
+The automatic pipeline processes every available video sequentially, compares routes, hides weak one-off detections without deleting their evidence, infers a likely entrance, and lays out the strongest route with branches. The result is an evidence graph, not a claim about exact in-game distances.
+
 ## Workflow
 
 1. Select one of the 28 preloaded dungeon playlists.
-2. Import playlist metadata and optionally download videos, or add an existing local video.
-3. Analyze a video. The default sample interval is five seconds.
-4. Click candidate rooms to compare their screenshots and jump to the exact video timestamp.
-5. Rename, classify, arrange, merge, confirm, or reject rooms and connections.
-6. Export the reviewed evidence graph for the OSFR team.
+2. Start automatic mapping.
+3. Click candidate rooms to compare screenshots and jump to exact video timestamps.
+4. Correct any uncertain matches.
+5. Export the reviewed evidence graph for the OSFR team.
 
 All state is local in `data/mapper.db`. Downloaded videos and sampled frames stay under `data/` and are ignored by Git.
 
