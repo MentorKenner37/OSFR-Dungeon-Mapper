@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OSFR Dungeon Mapper</title><link rel="stylesheet" href="style.css"></head>
+<body><header><div><span class="eyebrow">OPEN SOURCE FREE REALMS</span><h1>Dungeon Mapper</h1></div><span id="health" class="pill">LOCAL • EVIDENCE MODE</span></header>
+<main>
+  <aside>
+    <label>Dungeon</label><select id="dungeon"></select>
+    <div class="card"><h2>1. Gather footage</h2><button id="import">Import playlist metadata</button><button id="download" class="secondary">Import + download videos</button>
+      <div class="divider">or use a local video</div><input id="path" placeholder="/home/you/Videos/run.mp4"><button id="add">Add local video</button></div>
+    <div class="card"><h2>2. Analyze</h2><label>Sample every <input id="interval" type="number" value="5" min="1" max="60"> seconds</label><select id="video"><option>Select a ready video</option></select><button id="analyze">Analyze selected video</button></div>
+    <div class="card"><h2>3. Export</h2><button id="export">Export evidence JSON</button><button id="dot" class="secondary">Export Graphviz DOT</button></div>
+    <pre id="message">Ready.</pre>
+  </aside>
+  <section class="workspace"><div class="toolbar"><div><strong id="title">Dungeon graph</strong><small id="stats"></small></div><div class="legend"><i class="confirmed"></i> Confirmed <i class="candidate"></i> Candidate</div></div>
+    <svg id="graph" viewBox="0 0 1200 700" aria-label="Dungeon room graph"></svg>
+    <h2>Review candidate rooms</h2><div id="rooms" class="rooms"></div>
+  </section>
+</main><script src="app.js"></script></body></html>
+
