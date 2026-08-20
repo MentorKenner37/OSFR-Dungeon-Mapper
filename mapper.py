@@ -221,6 +221,103 @@ def start_job(kind: str, function, *args) -> str:
     return job_id
 
 
+def job_update(job_id: str, message: str, current: int = 0, total: int = 0) -> None:
+    with JOBS_LOCK:
+        if job_id in JOBS: JOBS[job_id].update(message=message, current=current, total=total)
+
+
+def auto_layout(dungeon: str) -> dict:
+    """Lay out the evidence graph as routes and branches, never as a decorative circle."""
+    with db() as c:
+        d = c.execute("SELECT id FROM dungeons WHERE name=?", (dungeon,)).fetchone()
+        if not d: raise ValueError("Unknown dungeon")
+        did = d[0]
+        rooms = c.execute("SELECT id,floor FROM rooms WHERE dungeon_id=? AND status NOT IN ('rejected','uncertain')", (did,)).fetchall()
+        room_ids = {r[0] for r in rooms}
+        weighted = c.execute("""SELECT from_room,to_room,COUNT(DISTINCT video_id) videos,COUNT(*) observations
+          FROM transitions WHERE dungeon_id=? AND status!='rejected' GROUP BY from_room,to_room
+          ORDER BY videos DESC,observations DESC""", (did,)).fetchall()
+        adjacency: dict[int, list[tuple[int,int]]] = {rid: [] for rid in room_ids}; incoming = Counter()
+        for a,b,videos,observations in weighted:
+            if a in room_ids and b in room_ids:
+                adjacency[a].append((b, videos * 100 + observations)); incoming[b] += videos * 100 + observations
+        first = c.execute("""SELECT e.room_id FROM evidence e JOIN videos v ON v.id=e.video_id
+          JOIN rooms r ON r.id=e.room_id WHERE v.dungeon_id=? AND r.status NOT IN ('rejected','uncertain')
+          ORDER BY v.id,e.timestamp LIMIT 1""", (did,)).fetchone()
+        candidates = sorted(room_ids, key=lambda rid: (incoming[rid], rid))
+        entrance_id = first[0] if first and first[0] in room_ids else (candidates[0] if candidates else None)
+        roots = ([entrance_id] if entrance_id is not None else []) + [r for r in candidates if r != entrance_id]
+        depth: dict[int,int] = {}; order: list[int] = []
+        for root in roots:
+            if root in depth: continue
+            depth[root] = 0 if not order else max(depth.values(), default=0) + 1
+            queue = [root]
+            while queue:
+                node = queue.pop(0); order.append(node)
+                for nxt,_weight in sorted(adjacency.get(node, []), key=lambda x: -x[1]):
+                    if nxt not in depth:
+                        depth[nxt] = depth[node] + 1; queue.append(nxt)
+        columns: dict[tuple[int,int], list[int]] = {}
+        floors = {r[0]: r[1] or 1 for r in rooms}
+        for rid in order: columns.setdefault((floors[rid], depth[rid]), []).append(rid)
+        for (floor, column), ids in columns.items():
+            for row, rid in enumerate(ids):
+                x = 120 + column * 210
+                y = 110 + row * 125 + (floor - 1) * 35
+                c.execute("UPDATE rooms SET x=?,y=? WHERE id=?", (x, y, rid))
+        return {"positioned": len(order), "entrance_room_id": entrance_id}
+
+
+def classify_uncertain_rooms(dungeon: str) -> dict:
+    """Keep weak one-off detections out of the primary map without deleting evidence."""
+    with db() as c:
+        did = c.execute("SELECT id FROM dungeons WHERE name=?", (dungeon,)).fetchone()[0]
+        rows = c.execute("""SELECT r.id,COUNT(e.id) observations,COUNT(DISTINCT e.video_id) videos
+          FROM rooms r LEFT JOIN evidence e ON e.room_id=r.id WHERE r.dungeon_id=? AND r.status='candidate'
+          GROUP BY r.id""", (did,)).fetchall()
+        hidden = 0
+        for rid, observations, videos in rows:
+            if observations < 3 and videos < 2:
+                c.execute("UPDATE rooms SET status='uncertain',confidence=.25 WHERE id=?", (rid,)); hidden += 1
+            else:
+                confidence = min(.95, .45 + videos * .12 + min(observations, 10) * .025)
+                c.execute("UPDATE rooms SET confidence=? WHERE id=?", (confidence, rid))
+        return {"uncertain_rooms": hidden}
+
+
+def map_entire_dungeon(job_id: str, dungeon: str, interval: float = 5.0) -> dict:
+    job_update(job_id, "Finding and downloading dungeon footage")
+    imported = import_playlist(dungeon, True)
+    with db() as c:
+        videos = [dict(v) for v in c.execute("""SELECT v.id,v.title FROM videos v JOIN dungeons d ON d.id=v.dungeon_id
+          WHERE d.name=? AND v.path IS NOT NULL ORDER BY v.id""", (dungeon,))]
+    results = []
+    for index, video in enumerate(videos, 1):
+        job_update(job_id, f"Analyzing video {index} of {len(videos)}: {video['title']}", index, len(videos))
+        results.append(analyze_video(video["id"], interval))
+    job_update(job_id, "Comparing routes across videos", len(videos), len(videos))
+    uncertainty = classify_uncertain_rooms(dungeon)
+    layout = auto_layout(dungeon)
+    job_update(job_id, "Map ready for review", len(videos), len(videos))
+    return {"playlist": imported, "videos_analyzed": len(videos), "analysis": results,
+            "layout": layout, **uncertainty}
+
+
+def start_mapping(dungeon: str, interval: float = 5.0) -> str:
+    job_id = uuid.uuid4().hex[:12]
+    with JOBS_LOCK:
+        JOBS[job_id] = {"id": job_id, "kind": "map-dungeon", "status": "queued", "message": "Preparing", "created": time.time()}
+    def runner():
+        with JOBS_LOCK: JOBS[job_id]["status"] = "running"
+        try:
+            result = map_entire_dungeon(job_id, dungeon, interval)
+            with JOBS_LOCK: JOBS[job_id].update(status="complete", message="Map ready for review", result=result, finished=time.time())
+        except Exception as exc:
+            with JOBS_LOCK: JOBS[job_id].update(status="failed", message="Mapping stopped", error=str(exc), finished=time.time())
+    threading.Thread(target=runner, daemon=True).start()
+    return job_id
+
+
 def merge_rooms(source_id: int, target_id: int) -> None:
     if source_id == target_id: return
     with db() as c:
@@ -329,6 +426,9 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             b = self.body()
             if self.path == "/api/local-video": result = {"video_id": add_local_video(b["dungeon"], b["path"])}
+            elif self.path == "/api/map-dungeon":
+                result = {"job_id": start_mapping(b["dungeon"], float(b.get("interval", 5)))}
+            elif self.path == "/api/auto-layout": result = auto_layout(b["dungeon"])
             elif self.path == "/api/import": result = import_playlist(b["dungeon"], bool(b.get("download")))
             elif self.path == "/api/analyze":
                 result = {"job_id": start_job("analyze", analyze_video, int(b["video_id"]), float(b.get("interval", 5)))}
