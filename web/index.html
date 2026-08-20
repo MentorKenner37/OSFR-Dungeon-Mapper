@@ -6,17 +6,16 @@
 <main>
   <aside>
     <label>Dungeon</label><select id="dungeon"></select>
-    <nav><button data-tab="source" class="tab active">Sources</button><button data-tab="export" class="tab">Export</button></nav>
-    <div data-panel="source">
-      <div class="card"><h2>Gather footage</h2><button id="import">Import playlist metadata</button><button id="download" class="secondary">Import + download videos</button>
-        <div class="divider">or use a local video</div><input id="path" placeholder="/home/you/Videos/run.mp4"><button id="add">Add local video</button></div>
-      <div class="card"><h2>Analyze</h2><label>Sample every <input id="interval" type="number" value="5" min="1" max="60"> seconds</label><select id="video"><option>Select a ready video</option></select><button id="analyze">Queue analysis</button></div>
-    </div>
-    <div data-panel="export" hidden><div class="card"><h2>Export verified research</h2><button id="export">Evidence JSON</button><button id="dot" class="secondary">Graphviz DOT</button><button id="csv" class="secondary">Connection CSV</button></div></div>
+    <div class="card primary"><h2>Automatic mapping</h2><p>Downloads every available video, analyzes them in order, compares routes, hides weak detections, and builds the map.</p><button id="mapAll" class="hero">START MAPPING THIS DUNGEON</button><div class="progress"><i id="progressBar"></i></div><small id="progressText">Ready to begin.</small></div>
+    <details><summary>Advanced controls</summary>
+      <div class="card"><h2>Footage</h2><button id="import">Import metadata only</button><button id="download" class="secondary">Download without mapping</button><div class="divider">or use a local video</div><input id="path" placeholder="/home/you/Videos/run.mp4"><button id="add">Add local video</button></div>
+      <div class="card"><h2>Single-video analysis</h2><label>Sample every <input id="interval" type="number" value="5" min="1" max="60"> seconds</label><select id="video"><option>Select a ready video</option></select><button id="analyze">Analyze selected video</button><button id="layout" class="secondary">Rebuild automatic layout</button></div>
+    </details>
+    <div class="card"><h2>Export finished map</h2><button id="export">Evidence JSON</button><button id="dot" class="secondary">Graphviz DOT</button><button id="csv" class="secondary">Connection CSV</button></div>
     <pre id="message">Ready.</pre>
   </aside>
   <section class="workspace">
-    <div class="topbar"><div><strong id="title">Dungeon graph</strong><small id="stats"></small></div><div class="filters"><label>Floor <select id="floor"><option value="all">All</option></select></label><span class="legend"><i class="confirmed"></i>Confirmed <i class="candidate"></i>Candidate</span></div></div>
+    <div class="topbar"><div><strong id="title">Dungeon graph</strong><small id="stats"></small></div><div class="filters"><label><input id="uncertain" type="checkbox"> Show uncertain</label><label>Floor <select id="floor"><option value="all">All</option></select></label><span class="legend"><i class="confirmed"></i>Confirmed <i class="candidate"></i>Candidate</span></div></div>
     <div class="split">
       <div class="map-wrap"><svg id="graph" viewBox="0 0 1200 700" aria-label="Editable dungeon room graph"></svg><div class="hint">Drag rooms to arrange • click a room to inspect evidence</div></div>
       <section class="reviewer">
