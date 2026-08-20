@@ -37,8 +37,26 @@ class MapperTests(unittest.TestCase):
                     c.executemany("INSERT INTO transitions(dungeon_id,from_room,to_room,video_id,timestamp) VALUES(?,?,?,?,?)",[(did,a,b,v1,5),(did,a,b,v2,6)])
                 graph=mapper.graph_data('The Bat Cave')
                 self.assertEqual(graph['edges'][0]['supporting_videos'],2)
+                layout=mapper.auto_layout('The Bat Cave')
+                self.assertEqual(layout['entrance_room_id'],a)
+                with mapper.db() as c:
+                    ax=c.execute("SELECT x FROM rooms WHERE id=?",(a,)).fetchone()[0]
+                    bx=c.execute("SELECT x FROM rooms WHERE id=?",(b,)).fetchone()[0]
+                    self.assertGreater(bx,ax)
                 mapper.merge_rooms(duplicate,b)
                 with mapper.db() as c: self.assertIsNone(c.execute("SELECT id FROM rooms WHERE id=?",(duplicate,)).fetchone())
             finally: mapper.DB, mapper.EXPORT_DIR = old_db, old_export
+    def test_weak_rooms_are_hidden_not_deleted(self):
+        with tempfile.TemporaryDirectory() as td:
+            old_db=mapper.DB; mapper.DB=Path(td)/'test.db'
+            try:
+                mapper.init_db()
+                with mapper.db() as c:
+                    did=c.execute("SELECT id FROM dungeons WHERE name='The Bat Cave'").fetchone()[0]
+                    rid=c.execute("INSERT INTO rooms(dungeon_id,label) VALUES(?,?)",(did,'One frame')).lastrowid
+                result=mapper.classify_uncertain_rooms('The Bat Cave')
+                self.assertEqual(result['uncertain_rooms'],1)
+                with mapper.db() as c: self.assertEqual(c.execute("SELECT status FROM rooms WHERE id=?",(rid,)).fetchone()[0],'uncertain')
+            finally: mapper.DB=old_db
 
 if __name__ == '__main__': unittest.main()
