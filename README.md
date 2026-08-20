@@ -5,7 +5,7 @@ An evidence-first tool for reconstructing Free Realms dungeons from archived gam
 [![Tests](https://github.com/MentorKenner37/OSFR-Dungeon-Mapper/actions/workflows/tests.yml/badge.svg)](https://github.com/MentorKenner37/OSFR-Dungeon-Mapper/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-The mapper deliberately produces an evidence-backed **room graph**, not an invented geometric floor plan. Version 0.3 can download and process a complete dungeon playlist, compare routes across videos, and automatically arrange the resulting route and branches.
+The mapper deliberately produces an evidence-backed **room graph**, not an invented geometric floor plan. Version 0.3.1 can download and process a complete dungeon playlist, suppress camera-change noise, compare repeated routes across videos, and automatically arrange the resulting route and branches.
 
 ## Highlights
 
